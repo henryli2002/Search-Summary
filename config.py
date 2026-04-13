@@ -24,7 +24,17 @@ def _load_dotenv(env_path: Path = Path(".env")) -> None:
             if "=" not in line:
                 continue
             key, _, value = line.partition("=")
-            key, value = key.strip(), value.strip()
+            key = key.strip()
+            
+            # 去除行内注释 (支持 # 前面有空格)
+            if " #" in value:
+                value = value.split(" #")[0]
+            value = value.strip()
+            
+            # 去除首尾的引号
+            if (value.startswith('"') and value.endswith('"')) or \
+               (value.startswith("'") and value.endswith("'")):
+                value = value[1:-1]
             # 不覆盖已存在的系统环境变量
             if key and key not in os.environ:
                 os.environ[key] = value
@@ -105,6 +115,9 @@ _CONFIG = {
 
         # 每个种子论文最多获取多少篇引用/被引
         "per_seed_limit": _env_int("EXPAND_PER_SEED_LIMIT", 20),
+    },
+    "report": {
+        "language": _env("REPORT_LANGUAGE", "Auto"),
     },
 }
 

@@ -260,6 +260,118 @@ def _llm_select_seeds(
         return candidates[:select_count]
 
 
+# ─── M2: 大模型批量初筛 (Batch LLM Screening) ──────────────────────────
+
+_BATCH_SCREEN_PROMPT = (
+    "You are an academic relevance screener.\n"
+    "Given the user's ORIGINAL RESEARCH QUERY and a batch of candidate papers, "
+    "select ONLY the papers that are genuinely related to the query topic.\n\n"
+    "User Query: {query}\n\n"
+    "Candidate Papers:\n{candidates_json}\n\n"
+    "Filter out any papers that are tangentially related, from entirely different domains, or irrelevant.\n"
+    "Return a JSON array containing ONLY the `paper_id`s of the surviving relevant papers.\n"
+    "Return format example: [\"paper_id_1\", \"paper_id_2\"]\n"
+    "If none are relevant, return an empty array: []\n"
+)
+
+
+@retry(
+    wait=wait_random_exponential(multiplier=1, max=30),
+    stop=stop_after_attempt(3),
+    reraise=True,
+)
+def _llm_batch_screen_chunk(
+    chunk: list[dict],
+    *,
+    query: str,
+    client: genai.Client,
+) -> set[str]:
+    """对一批小规模文献（如 20 篇）进行相关性初筛，返回存活的 paper_id 集合。"""
+    cands_payload = []
+    for p in chunk:
+        cands_payload.append({
+            "paper_id": p.get("paperId", ""),
+            "title": p.get("title", "Untitled"),
+            "abstract": (p.get("abstract") or "")[:200], # 截断摘要以节省 token
+        })
+
+    import json
+    prompt = _BATCH_SCREEN_PROMPT.format(
+        query=query,
+        candidates_json=json.dumps(cands_payload, ensure_ascii=False, indent=2),
+    )
+
+    try:
+        response = client.models.generate_content(
+            model=CONFIG["llm"]["flash_model"],
+            contents=prompt,
+            config=genai.types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+            ),
+        )
+        selected_ids = json.loads(response.text)
+
+        # 容错提取
+        if isinstance(selected_ids, dict):
+            selected_ids = (
+                selected_ids.get("paper_ids")
+                or selected_ids.get("selected")
+                or selected_ids.get("ids")
+                or list(selected_ids.values())[0]
+            )
+
+        if not isinstance(selected_ids, list):
+            raise ValueError(f"Unexpected array format: {type(selected_ids)}")
+            
+        return set(str(pid) for pid in selected_ids)
+        
+    except Exception as e:
+        logger.warning(f"Batch screen chunk failed: {e}. Passing all chunk papers as fallback.")
+        return set(p.get("paperId") for p in chunk if p.get("paperId"))
+
+
+def _llm_batch_screen_all(
+    papers: list[dict],
+    *,
+    query: str,
+    client: genai.Client,
+    chunk_size: int = 20,
+    max_workers: int = 5,
+) -> list[dict]:
+    """并发对所有论文进行初筛，滤除偏题论文。"""
+    if not papers:
+        return []
+        
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    
+    survived_ids = set()
+    chunks = [papers[i:i + chunk_size] for i in range(0, len(papers), chunk_size)]
+    
+    logger.info(f"🧠 LLM Batch Screening: {len(papers)} papers in {len(chunks)} chunks.")
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_chunk = {
+            executor.submit(
+                _llm_batch_screen_chunk, chunk, query=query, client=client
+            ): chunk
+            for chunk in chunks
+        }
+        
+        for i, future in enumerate(as_completed(future_to_chunk)):
+            chunk_ids = future.result()
+            survived_ids.update(chunk_ids)
+            logger.info(
+                f"  ✓ Chunk {i+1}/{len(chunks)} processed: "
+                f"{len(chunk_ids)}/{len(future_to_chunk[future])} survived."
+            )
+            
+    # 只保留存活的论文
+    survived_papers = [p for p in papers if p.get("paperId") in survived_ids]
+    logger.info(f"🧠 Batch Screen Final: {len(survived_papers)}/{len(papers)} papers passed relevance check.")
+    return survived_papers
+
+
 def _expand_via_citations(
     raw_papers: dict[str, dict],
     *,
@@ -627,8 +739,22 @@ def fetch_and_score(
         logger.warning("No papers remaining after citation filter.")
         return []
 
-    # ── 3. 双池选拔（去马太效应） ───────────────────────────────
+    # ── 3. 大模型批量初筛 (LLM Batch Screening) ───────────
     all_raw = list(raw_papers.values())
+    
+    if all_raw:
+        all_raw = _llm_batch_screen_all(
+            all_raw,
+            query=query,
+            client=client,
+            chunk_size=20,
+        )
+
+    if not all_raw:
+        logger.warning("No papers remaining after LLM batch screening.")
+        return []
+
+    # ── 4. 双池选拔（去马太效应） ───────────────────────────────
 
     if len(all_raw) > process_limit:
         selected_raw = _dual_pool_select(

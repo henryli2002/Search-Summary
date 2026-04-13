@@ -32,7 +32,7 @@ _TAXONOMY_PROMPT = (
     "4. Return a list of groups, each with a group_name and a list of paper_ids.\n\n"
     "Rules:\n"
     "- Every paper_id from the input MUST appear in exactly one group.\n"
-    "- Group names should be concise, descriptive, and in English.\n"
+    "- Group names should be concise, descriptive, and STRICTLY IN ENGLISH, regardless of the input language or previous text.\n"
     "- Do NOT create an 'Other' or 'Miscellaneous' category unless absolutely necessary.\n\n"
     "Papers:\n{papers_json}\n"
 )

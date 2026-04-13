@@ -37,15 +37,19 @@ class PaperData(BaseModel):
 # ─── 模块 3：Map 阶段输出 ──────────────────────────────────────────
 class AbstractAnalysis(BaseModel):
     """Flash 模型对单篇论文摘要的结构化事实提取结果。"""
+    is_relevant_to_query: bool = Field(
+        ...,
+        description="True if the paper is directly relevant to the user's original query, False otherwise."
+    )
     core_problem: str = Field(
-        ..., description="The specific problem this paper addresses."
+        ..., description="The specific problem this paper addresses. Provide even if irrelevant."
     )
     key_mechanisms: List[str] = Field(
         ...,
-        description="Concrete technical methods used, e.g. 'RLHF', 'AST parsing', 'Transformer'.",
+        description="Concrete technical methods used, e.g. 'RLHF', 'AST parsing', 'Transformer'. Provide even if irrelevant.",
     )
     one_line_summary: str = Field(
-        ..., description="A single-sentence factual summary of the paper."
+        ..., description="A single-sentence factual summary of the paper. Provide even if irrelevant."
     )
 
 

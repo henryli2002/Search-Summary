@@ -34,11 +34,13 @@ def extract_entities(query: str, *, client: genai.Client) -> list[str]:
     """
     prompt = (
         "You are an academic keyword expansion expert.\n"
-        "Given the user's research query below, generate a list of 3-7 synonym phrases "
-        "that describe the SAME research topic using different terminology.\n"
-        "Each phrase should be a valid search keyword for academic databases.\n"
-        "Do NOT include boolean operators (AND, OR, NOT).\n"
-        "Do NOT add unrelated or overly broad terms.\n\n"
+        "Your goal is to generate 3-5 highly specific search queries for the user's research topic.\n"
+        "Constraints:\n"
+        "1. BE SPECIFIC: Never generalize to broader parent categories (e.g., if the query is 'Agent Memory Compression', NEVER output 'Artificial Intelligence' or 'Machine Learning').\n"
+        "2. Keep the keywords directly focused on the exact technical problem or methodology requested.\n"
+        "3. Output MUST be valid, exact keyword phrases used in academic database searches.\n"
+        "4. No boolean operators (AND, OR, NOT).\n"
+        "5. ALL KEYWORDS MUST BE IN ENGLISH: Even if the user query is in Chinese or another language, translate the intent and output strictly English academic terms.\n\n"
         f"User Query: {query}"
     )
 

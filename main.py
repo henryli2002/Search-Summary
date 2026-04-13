@@ -165,6 +165,7 @@ def run_pipeline(query: str, *, resume: bool = False) -> str:
             progress.add_task("", total=None)
             enriched_papers = map_extract(
                 top_papers,
+                query=query,
                 client=client,
                 max_workers=5,
                 already_done=already_done,
@@ -184,6 +185,23 @@ def run_pipeline(query: str, *, resume: bool = False) -> str:
             f"  ♻️  [dim]模块 3 已恢复: {len(enriched_papers)} 篇论文[/]\n"
         )
 
+    # ── 3.5. 过滤不相关论文 (Relevance Filter) ───────────────
+    relevant_papers = [
+        ep for ep in enriched_papers if ep.analysis.is_relevant_to_query
+    ]
+    if len(relevant_papers) < len(enriched_papers):
+        console.print(
+            f"  ✂️  过滤器: 剔除了 {len(enriched_papers) - len(relevant_papers)} "
+            f"篇偏题论文，由于它们与 [yellow]{query}[/] 不直接相关。\n"
+            f"  ✓ 保留了 {len(relevant_papers)} 篇强相关论文进入分类。\n"
+        )
+    else:
+        console.print(f"  ✓ 所有 {len(relevant_papers)} 篇论文均被判定为强相关。\n")
+
+    if not relevant_papers:
+        console.print("[bold red]没有与主题强相关的论文，流水线终止。[/]")
+        return "# 无强相关文献\n\n所有检索到的文献均被 M3 阶段判定为与原 Query 主题不直接相关。"
+
     # ── 4. Shuffle 阶段 ───────────────────────────────────────
     if should_run("m4_grouped"):
         with Progress(
@@ -192,7 +210,7 @@ def run_pipeline(query: str, *, resume: bool = False) -> str:
             console=console,
         ) as progress:
             progress.add_task("", total=None)
-            grouped = shuffle_group(enriched_papers, client=client)
+            grouped = shuffle_group(relevant_papers, client=client)
 
         ckpt.save_m4(grouped)
         console.print(f"  ✓ 生成 {len(grouped)} 个技术流派:")

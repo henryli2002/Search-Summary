@@ -27,9 +27,15 @@ logger = logging.getLogger(__name__)
 # ─── Map 单篇提取 ─────────────────────────────────────────────────
 
 _MAP_PROMPT_TEMPLATE = (
-    "You are a factual information extractor for academic papers.\n"
-    "Given the paper title and abstract below, extract the following three fields.\n"
+    "You are a factual information extractor and relevance judge for academic papers.\n"
+    "Given the user's ORIGINAL RESEARCH QUERY and the paper title and abstract below:\n"
+    "1. FIRST, carefully determine if this paper is actually relevant to the user's ORIGINAL QUERY topic. "
+    "Set `is_relevant_to_query` to True ONLY IF the paper directly addresses or provides meaningful insight into the query topic. "
+    "If it is tangentially related or from a different domain entirely, set it to False.\n"
+    "2. THEN, extract the core factual information fields. You MUST write the extracted facts STRICTLY IN ENGLISH, regardless of the language of the original query.\n"
     "Do NOT classify or categorize the paper. Only extract factual information.\n\n"
+    "User's Original Query: {query}\n\n"
+    "Paper Article:\n"
     "Title: {title}\n"
     "Abstract: {abstract}\n"
 )
@@ -41,7 +47,7 @@ _MAP_PROMPT_TEMPLATE = (
     reraise=True,
 )
 def _fetch_abstract_analysis(
-    paper: PaperData, *, client: genai.Client
+    paper: PaperData, *, query: str, client: genai.Client
 ) -> AbstractAnalysis:
     """对单篇论文摘要进行结构化事实提取。
 
@@ -49,7 +55,7 @@ def _fetch_abstract_analysis(
     """
     abstract_text = paper.abstract or "No abstract available."
     prompt = _MAP_PROMPT_TEMPLATE.format(
-        title=paper.title, abstract=abstract_text
+        query=query, title=paper.title, abstract=abstract_text
     )
 
     response = client.models.generate_content(
@@ -70,6 +76,7 @@ def _fetch_abstract_analysis(
 def map_extract(
     papers: list[PaperData],
     *,
+    query: str,
     client: genai.Client,
     max_workers: int = 5,
     already_done: Optional[list[EnrichedPaper]] = None,
@@ -80,6 +87,7 @@ def map_extract(
 
     Args:
         papers: 模块 2 输出的评分后论文列表。
+        query: 用户原始查询。
         client: Gemini API 客户端实例。
         max_workers: 最大并发线程数。
         already_done: 之前已完成的 EnrichedPaper 列表（增量恢复用）。
@@ -113,7 +121,7 @@ def map_extract(
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_paper = {
             executor.submit(
-                _fetch_abstract_analysis, paper, client=client
+                _fetch_abstract_analysis, paper, query=query, client=client
             ): paper
             for paper in papers_to_process
         }
@@ -126,7 +134,8 @@ def map_extract(
                 new_since_last_save += 1
                 logger.info(
                     f"✓ [{len(enriched)}/{len(papers)}] "
-                    f"Mapped: {paper.title[:60]}..."
+                    f"Mapped (Relevant: {analysis.is_relevant_to_query}): "
+                    f"{paper.title[:60]}..."
                 )
 
                 # 定期触发 checkpoint 回调
