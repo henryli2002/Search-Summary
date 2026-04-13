@@ -26,7 +26,7 @@ _TAXONOMY_PROMPT = (
     "  - core_problem, key_mechanisms, one_line_summary\n\n"
     "Your task:\n"
     "1. Read ALL papers thoroughly.\n"
-    "2. Identify 3-5 mutually exclusive and collectively exhaustive "
+    "2. Identify 1-5 mutually exclusive and collectively exhaustive "
     "core technical schools/taxonomies.\n"
     "3. Assign every paper to exactly one taxonomy.\n"
     "4. Return a list of groups, each with a group_name and a list of paper_ids.\n\n"
