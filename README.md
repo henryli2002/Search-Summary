@@ -1,44 +1,47 @@
 # Search-By-Agent
 
-高可控轻量级学术文献综述自动化 Pipeline —— 全链路强类型约束、智能检索扩展与断点续跑。
+高可控轻量级学术文献综述自动化 Pipeline —— 全链路强类型约束、智能的大模型相关性初筛与断点续跑。
 
-输入一个研究主题，自动完成：关键词提取 → 文献检索 → 引用链扩展 → 结构化分析 → 技术流派分类 → Markdown 综述报告。
+输入一个研究主题，自动完成：关键词提取 → 文献检索 → 引用链扩展 → **大模型并发批量初筛** → 双池选拔 → 结构化事实提取 → 技术流派分类 → Markdown 综述报告。
+
+无论是搜索什么语言，中间所有检索和提取过程均已强制英语化以适配顶级学术文献库，生成最终报告时再随心切换为你想要的语言（中/英等）。
 
 ## 架构概览
 
 ```
-用户 Query
-   │
-   ▼
-┌─────────────────────────────────────┐
-│  Module 1: Entity Extractor         │  Gemini Flash + Pydantic Schema
-│  提取同义词/近义词关键词组            │
-└──────────────┬──────────────────────┘
-               │ List[str]
+用户 Query (如: "LLM记忆管理")
+               │
                ▼
 ┌─────────────────────────────────────┐
-│  Module 2: Fetch & Score Funnel     │  S2AG API + Citation Snowballing
-│  关键词检索 → 引用链扩展 → 去重      │  去马太效应双池选拔
-│  → 过滤 → 双池选拔 → 评分 → Top N   │  LLM 智能种子筛选
+│  Module 1: Entity Extractor         │  Gemini Flash 
+│  严格提取学术标准的[英文]近义关键词      │
 └──────────────┬──────────────────────┘
-               │ List[PaperData]
+               │ List[str] (e.g., ["Agent memory optimization", ...])
+               ▼
+┌─────────────────────────────────────┐
+│  Module 2: Fetch & Score Funnel     │  S2AG API + LLM Batch Screening
+│  关键词检索 → 引用链扩展(Snowballing) │  
+│  → LLM大模型并发批量把关(剔除偏题文献)  │  ← [关键! 避免高引水分论文污染]
+│  → 去马太效应双池选拔 → 评分排序       │
+└──────────────┬──────────────────────┘
+               │ List[PaperData] (仅保留高度相关的 Top N 精英论文)
                ▼
 ┌─────────────────────────────────────┐
 │  Module 3: Map (Extraction)         │  Gemini Flash × N (并发)
-│  隔离式结构化事实提取                │  增量保存 + 指数退避
+│  隔离式结构化事实提取 (强制英文输出)      │  增量保存 + 指数退避 + 单篇相关性双重校验
 └──────────────┬──────────────────────┘
                │ List[EnrichedPaper]
                ▼
 ┌─────────────────────────────────────┐
 │  Module 4: Shuffle (Taxonomy)       │  Gemini Pro (单次全局调用)
-│  3-5 个互斥穷尽技术流派分类          │  多格式容错解析
+│  1-5 个互斥穷尽的技术流派分类(英文命名)  │  多格式容错解析
 └──────────────┬──────────────────────┘
                │ Dict[str, List[EnrichedPaper]]
                ▼
 ┌─────────────────────────────────────┐
 │  Module 5: Reduce (Report)          │  Gemini Pro × 组数
-│  按流派生成评述 → 拼接 Markdown      │
-│  → 完整 Reference 列表              │
+│  按最终设定的报告语言动态翻译并生成评述  │  支持: REPORT_LANGUAGE=(中文|English|Auto)
+│  → 拼接包含引用和链接的 Markdown       │
 └──────────────┬──────────────────────┘
                │ Markdown Report
                ▼
@@ -47,11 +50,11 @@
 
 ## 核心特性
 
-- **🔍 智能检索扩展**：关键词搜索 + Citation Snowballing，LLM 筛选种子论文避免话题离散
-- **⚖️ 去马太效应**：双池选拔策略，用 `log(1+citations)` 压缩引用数，防止高引论文垄断
-- **🛡️ 全链路容错**：429/5xx 无限重试（指数退避 5-120s），支持断点续跑
-- **🎯 灵活过滤**：学科领域限制、引用数阈值 + 近年豁免规则
-- **📦 强类型约束**：全链路 Pydantic 模型，LLM 仅负责提取，逻辑判断由 Python 显式控制
+- **🚀 零极偏题 (LLM Batch Screening)**：在引用数打分前，系统会将上百篇搜索到的庞大文献库切分为多个小块并发喂给大模型进行“初筛诊断”，利用最低的 Token 成本拦截所有“偏题凑字数”的高引论文。
+- **🌐 语言无边界 (Cross-Lingual Flow)**：你可以用中文查询，流水线中段会全栈使用纯粹的 Academic English（学术英语）同各种 API 及模型进行沟通，最后再在 M5 的组装阶段把成果毫无断层地翻译回中文或其他语言排版生成，消除信息差。
+- **🔍 智能检索扩展**：关键词搜索 + Citation Snowballing（文献滚雪球追踪），LLM 筛选种子论文避免发散。
+- **⚖️ 去马太效应**：经过大模型“初筛存活”下来的论文池，采用“双池选拔策略”，用 `log(1+citations)` 压缩引用数防垄断，同时设定特定配额保护近期零引用的最新文献。
+- **🛡️ 全链路容错**：哪怕面临 429 或 5xx 限流报错，系统也会采用无休止的指数退避（5s-120s）配合增量保存。你甚至可以中断进程并在几天后跑 `./run.sh --resume` 进行挂后台续跑！
 
 ## 快速开始
 
@@ -65,7 +68,7 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填入你的 GOOGLE_API_KEY
+# 编辑 .env，填入你的 GOOGLE_API_KEY （可自由选择其他大模型）
 ```
 
 **必填**：
@@ -73,181 +76,74 @@ cp .env.example .env
 GOOGLE_API_KEY=your-gemini-api-key    # https://aistudio.google.com/apikey
 ```
 
-**可选（推荐）**：
-```env
-S2AG_API_KEY=your-s2ag-api-key        # https://www.semanticscholar.org/product/api#api-key
-```
-
-> **Semantic Scholar API Key 说明**
->
-> - **不设置**：可直接使用，但速率限制较严（100 次请求 / 5 分钟），429 会触发自动退避等待
-> - **设置后**：提升至 1 req/sec，显著加快检索速度
-> - 免费申请：https://www.semanticscholar.org/product/api#api-key
-
 ### 3. 运行
 
 ```bash
 # 使用便捷脚本（推荐，自动检查环境和依赖）
-./run.sh "Retrieval Augmented Generation"
+./run.sh "Agent长记忆压缩"
 
 # 或直接调用 Python
-python main.py "Vision Language Action"
-
-# 指定输出文件
-./run.sh "大模型代码生成技术" --output my_report.md
+python main.py "Agent长记忆压缩"
 ```
 
-### 4. 断点续跑
+### 4. 断点续跑与状态管理
 
-Pipeline 在每个模块完成后自动保存 checkpoint。中途因 API 限流或网络问题中断后，可直接恢复：
+Pipeline 中途因网络或不可抗力中断？它已经存好了 Checkpoint！
 
 ```bash
-# 从上次中断处恢复
-./run.sh "大模型代码生成技术" --resume
+# 从上次中断处（比如刚做完信息提取的 M3）恢复接着做流派分类
+./run.sh "Agent长记忆压缩" --resume
 
-# 查看 checkpoint 状态
-./run.sh --status "大模型代码生成技术"
+# 查看当前运行任务的具体进度状态
+./run.sh --status "Agent长记忆压缩"
 
-# 列出所有历史运行记录
-./run.sh --list
+# 临时想换个语言？更改 .env 后直接用 --resume，它会秒拉之前的 M4 缓存并用新语言生报告！
 
-# 清理所有 checkpoint 数据
+# 清理所有的缓存（如果你想彻底重新跑一边）
 ./run.sh --clean
 ```
 
-## 配置参考
-
-所有配置通过 `.env` 文件覆盖，运行时冻结（`MappingProxyType`）不可修改。
-
-### 搜索参数
+## 配置参考 (.env)
 
 | 环境变量 | 默认值 | 说明 |
 |----------|--------|------|
+| `REPORT_LANGUAGE` | 中文 | [**🆕 新增**] 最终报告的母语 (Auto, 中文, English)，中间全部流程走英文不受影响检索 |
 | `SEARCH_MIN_YEAR` | 2020 | 文献年份下限 |
 | `SEARCH_MAX_YEAR` | 2026 | 文献年份上限 |
-| `SEARCH_FETCH_LIMIT` | 50 | 每个关键词的 API 获取量 |
-| `SEARCH_PROCESS_LIMIT` | 30 | 进入 Map 阶段的论文总数上限 |
-| `SEARCH_RECENCY_WEIGHT` | 0.65 | 评分中时间权重（越高越偏向新论文） |
+| `SEARCH_PROCESS_LIMIT` | 30 | 经过大模型筛选和去马太效应双池过滤后，最终能进入 M3 精读的精英论文数量 |
+| `FILTER_MIN_CITATIONS` | 3 | 最低引用数阈值（会被 Exempt Year 豁免） |
+| `FILTER_CITATION_EXEMPT_YEAR` | 2024 | 该年份及之后的最新论文**不受**被引数限制 |
+| `EXPAND_ENABLED` | true | 是否开启引用追踪（Citation Snowballing），挖出最对路的核心引用文献 |
 
-### 过滤规则
+## 去马太效应工作流 (Anti-Matthew Selection)
 
-| 环境变量 | 默认值 | 说明 |
-|----------|--------|------|
-| `FILTER_FIELDS_OF_STUDY` | *(空)* | 学科领域过滤，逗号分隔（如 `Computer Science,Engineering`） |
-| `FILTER_MIN_CITATIONS` | 0 | 最低引用数阈值（0=不过滤） |
-| `FILTER_CITATION_EXEMPT_YEAR` | 2024 | 该年份及之后的论文不受引用数限制 |
-| `FILTER_RECENT_LIMIT` | 15 | 双池选拔中新论文池的最大容量 |
+当通过了 LLM 严格的批量主题相关性初筛后，如果存活论文仍然超过 `process_limit`，系统启用双池选拔：
 
-### 引用链扩展（Citation Snowballing）
-
-| 环境变量 | 默认值 | 说明 |
-|----------|--------|------|
-| `EXPAND_ENABLED` | true | 是否启用引用链扩展 |
-| `EXPAND_SEED_COUNT` | 3 | 种子论文数量（由 LLM 从高引候选中筛选） |
-| `EXPAND_DIRECTION` | both | 扩展方向：`references` / `citations` / `both` |
-| `EXPAND_PER_SEED_LIMIT` | 20 | 每个种子每个方向的最大获取数 |
-
-### 模型配置
-
-| 环境变量 | 默认值 | 说明 |
-|----------|--------|------|
-| `LLM_FLASH_MODEL` | gemini-2.5-flash | 高并发提取用模型（M1/M3/种子筛选） |
-| `LLM_PRO_MODEL` | gemini-2.5-pro | 全局分类与总结用模型（M4/M5） |
-
-## 评分公式
-
-$$Score = w_{recency} \cdot \frac{year - year_{min}}{year_{max} - year_{min}} + (1 - w_{recency}) \cdot \frac{\log(1 + citations)}{\log(1 + citations_{max})}$$
-
-当论文总数超过 `process_limit` 时，启用**双池选拔**（去马太效应）：
-
-```
-全部论文 ─┬─ 新论文池 (year >= exempt_year)
-          │    └─ 按引用数排序 → top recent_limit
-          │
-          └─ 经典论文池 (year < exempt_year)
-               └─ 按 log(1+citations) 排序 → 填满剩余配额
-                  (去马太效应：1000引用 ≈ 3x 权重于10引用，而非100x)
+```text
+存活的精英论文 ─┬─ 新论文池 (year >= exempt_year) 
+            │    └─ 按绝对引用数排序 → 选拔不超过 recent_limit
+            │
+            └─ 经典论文池 (year < exempt_year)
+                 └─ 按 log(1+citations) 曲线排序 → 填满剩余坑位
+                    (防止动辄几万引的综述常青树永远霸榜，给 100 引用甚至 50 引用的精对口小论文机会)
 ```
 
-## 引用链扩展工作流
+## 项目目录结构
 
-```
-关键词检索 → 发现 N 篇论文
-     │
-     ▼
-取引用数前 3×seed_count 篇作为候选
-     │
-     ▼
-LLM (Flash) 评估候选与查询的相关性
-     │  ← 避免离题高引论文带偏扩展方向
-     ▼
-选出 seed_count 篇种子
-     │
-     ├─→ 获取 references (种子引用了哪些论文)
-     └─→ 获取 citations  (哪些论文引用了种子)
-     │
-     ▼
-合并去重 → 扩展后的论文池
-     │
-     ▼
-引用过滤 → 双池选拔 → 评分排序 → Top N
-```
-
-## 模块详解
-
-| 模块 | 输入 | 输出 | 模型 | 重试策略 | Checkpoint |
-|------|------|------|------|----------|------------|
-| **M1** Entity Extractor | 用户 Query | `List[str]` 关键词组 | Flash | 指数退避 ×5 | `m1_keywords.json` |
-| **M2** Fetch & Score | 关键词组 | `List[PaperData]` Top N | S2AG API + Flash | 无限重试（429/5xx） | `m2_papers.json` |
-| **M3** Map Extract | Top N 论文 | `List[EnrichedPaper]` | Flash ×N 并发 | 指数退避 ×5 + 增量保存 | `m3_enriched.json` |
-| **M4** Shuffle Group | 全部论文 | `Dict[str, List]` 分组 | Pro ×1 | 指数退避 ×5 | `m4_grouped.json` |
-| **M5** Reduce Report | 分组数据 | Markdown 报告 + References | Pro ×组数 | 指数退避 ×5 | `m5_report.md` |
-
-### Checkpoint 机制
-
-- 每个模块完成后，输出被序列化到 `checkpoints/<run_id>/` 目录
-- M3 (Map) 支持**增量恢复**：已成功处理的论文不会重复调用 API
-- `--resume` 自动检测最后完成的阶段，从下一阶段继续
-- 429/5xx 错误会无限重试（指数退避 5-120s），可放心挂后台过夜运行
-
-```
-checkpoints/<run_id>/
-├── meta.json                # 运行元信息（query, 时间戳）
-├── m1_keywords.json         # 模块 1 输出
-├── m2_papers.json           # 模块 2 输出
-├── m3_enriched.json         # 模块 3 输出
-├── m3_enriched_partial.json # 模块 3 增量保存
-├── m4_grouped.json          # 模块 4 输出
-└── m5_report.md             # 最终报告
-```
-
-## 项目结构
-
-```
+```text
 Search-By-Agent/
-├── run.sh                  # 便捷启动脚本（推荐入口）
-├── main.py                 # 主编排器（支持 --resume/--status/--list）
-├── config.py               # 全局冻结配置（MappingProxyType，支持 .env 覆盖）
-├── checkpoint.py           # Checkpoint 持久化管理器
-├── schemas.py              # Pydantic 强类型模型定义
-├── m1_entity_extractor.py  # 模块 1: Query → 同义词关键词组
-├── m2_fetch_score.py       # 模块 2: S2AG 检索 + 引用链扩展 + 双池评分
-├── m3_map_extract.py       # 模块 3: 并发结构化要素提取（增量恢复）
-├── m4_shuffle_group.py     # 模块 4: 技术流派分类（多格式容错）
-├── m5_reduce_report.py     # 模块 5: 按流派生成综述 + Reference 列表
-├── requirements.txt        # Python 依赖
-├── .env.example            # 环境变量模板（含完整参数说明）
-├── .gitignore              # Git 忽略规则
-├── checkpoints/            # 中间状态持久化（自动创建）
-└── output/                 # 生成的报告目录（自动创建）
+├── run.sh                  # 便捷启动脚本（核心入口）
+├── main.py                 # 流程主编排与界面绘制
+├── config.py               # 安全配置中心（剥离纯环境变量导致的引号/注释解析错误）
+├── checkpoint.py           # 容错续跑核心模块
+├── schemas.py              # Pydantic 强结构化类型定义
+├── m1_entity_extractor.py  # M1: Query → 学科标准英语关键词
+├── m2_fetch_score.py       # M2: 学术检索 → 大批量并行初筛 → 去马太排序
+├── m3_map_extract.py       # M3: 提取结构化事实 (增量并发提取)
+├── m4_shuffle_group.py     # M4: 上帝视角流派技术栈分类定义
+├── m5_reduce_report.py     # M5: 按配置母语翻译拼接最终的精美报告
+└── checkpoints/            # 临时生成的数据状态夹
 ```
-
-## 设计原则
-
-1. **LLM 职责分离**：LLM 仅负责提取和分类，逻辑判断（分组、过滤、排序）均由 Python 显式控制
-2. **强类型约束**：全链路 Pydantic 模型，确保模块间数据交换的严谨性
-3. **优雅降级**：LLM 种子筛选失败自动回退到引用数排序；M4 兼容多种 JSON 输出格式
-4. **全链路容错**：429/5xx 无限重试 + 关键词间冷却延迟 + 增量 checkpoint
 
 ## License
 
