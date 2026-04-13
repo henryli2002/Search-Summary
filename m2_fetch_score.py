@@ -258,6 +258,9 @@ def _llm_select_seeds(
     except Exception as e:
         logger.warning(f"LLM seed selection failed ({e}), falling back to top-cited")
         return candidates[:select_count]
+
+
+def _expand_via_citations(
     raw_papers: dict[str, dict],
     *,
     http_client: httpx.Client,
@@ -521,11 +524,18 @@ def _dual_pool_select(
     return selected
 
 
-def fetch_and_score(keywords: list[str]) -> list[PaperData]:
-    """主入口：搜索、去重、过滤、双池选拔、评分、排序。
+def fetch_and_score(
+    keywords: list[str],
+    *,
+    query: str,
+    client: genai.Client,
+) -> list[PaperData]:
+    """主入口：搜索、去重、引用链扩展、过滤、双池选拔、评分、排序。
 
     Args:
         keywords: 模块 1 输出的关键词列表。
+        query: 用户原始查询（用于 LLM 种子筛选）。
+        client: Gemini API 客户端。
 
     Returns:
         按评分降序排列的 Top N 篇 PaperData。

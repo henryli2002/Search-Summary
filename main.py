@@ -133,7 +133,7 @@ def run_pipeline(query: str, *, resume: bool = False) -> str:
             console=console,
         ) as progress:
             progress.add_task("", total=None)
-            top_papers = fetch_and_score(keywords)
+            top_papers = fetch_and_score(keywords, query=query, client=client)
 
         if not top_papers:
             console.print("[bold red]未检索到任何论文，流水线终止。[/]")
