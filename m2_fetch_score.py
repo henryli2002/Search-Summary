@@ -4,10 +4,11 @@
 输入：关键词组、Config 参数
 处理：
   1. 遍历关键词组调用 S2AG API 搜索（支持领域过滤）
-  2. 聚合去重
-  3. 引用数过滤（支持豁免年份）
-  4. 双池选拔：新论文池 + 经典论文池（去马太效应）
-  5. 对数平滑双维加权排序
+  2. 引用链扩展（Citation Snowballing）：用高引种子论文发现相关文献
+  3. 聚合去重
+  4. 引用数过滤（支持豁免年份）
+  5. 双池选拔：新论文池 + 经典论文池（去马太效应）
+  6. 对数平滑双维加权排序
 输出：按得分降序的 Top N 篇 PaperData 列表
 """
 
@@ -18,6 +19,7 @@ import logging
 import time
 
 import httpx
+from google import genai
 from tenacity import (
     retry, stop_after_attempt, wait_random_exponential,
     retry_if_exception_type,
@@ -39,16 +41,15 @@ class _RateLimitError(Exception):
 
 
 @retry(
-    wait=wait_random_exponential(multiplier=3, max=60),
-    stop=stop_after_attempt(6),
+    wait=wait_random_exponential(multiplier=5, max=120),
     retry=retry_if_exception_type(_RateLimitError),
-    reraise=True,
+    reraise=False,
 )
 def _search_s2ag(keyword: str, *, http_client: httpx.Client) -> list[dict]:
     """调用 Semantic Scholar Academic Graph API 搜索单个关键词。
 
-    429 会被转换为 _RateLimitError 触发更长的退避重试。
-    其他 HTTP 错误直接忽略带空结果返回。
+    429/5xx 会无限重试（指数退避 5-120s），直到成功。
+    其他 HTTP 错误返回空结果。
     """
     url = f"{CONFIG['s2ag']['base_url']}/paper/search"
     params = {
@@ -91,6 +92,274 @@ def _search_s2ag(keyword: str, *, http_client: httpx.Client) -> list[dict]:
 
     data = resp.json()
     return data.get("data", [])
+
+
+# ─── 引用链扩展 (Citation Snowballing) ─────────────────────────────
+
+@retry(
+    wait=wait_random_exponential(multiplier=5, max=120),
+    retry=retry_if_exception_type(_RateLimitError),
+    reraise=False,
+)
+def _fetch_related(
+    paper_id: str,
+    direction: str,
+    *,
+    http_client: httpx.Client,
+    limit: int = 20,
+) -> list[dict]:
+    """获取论文的引用/被引关系。
+
+    Args:
+        paper_id: S2AG 论文 ID。
+        direction: 'references' 或 'citations'。
+        http_client: httpx 客户端。
+        limit: 每个方向最多获取数量。
+
+    Returns:
+        论文 raw dict 列表。
+    """
+    url = f"{CONFIG['s2ag']['base_url']}/paper/{paper_id}/{direction}"
+    params = {
+        "fields": CONFIG["s2ag"]["fields"],
+        "limit": limit,
+    }
+    headers = {}
+    api_key = CONFIG["s2ag"]["api_key"]
+    if api_key:
+        headers["x-api-key"] = api_key
+
+    resp = http_client.get(
+        url, params=params, headers=headers,
+        timeout=CONFIG["s2ag"]["request_timeout"],
+    )
+
+    if resp.status_code == 429:
+        raise _RateLimitError(f"429 for {direction} of {paper_id}")
+    if resp.status_code >= 500:
+        raise _RateLimitError(f"{resp.status_code} for {direction} of {paper_id}")
+    if resp.status_code >= 400:
+        logger.warning(f"Skipping {direction} for {paper_id}: HTTP {resp.status_code}")
+        return []
+
+    data = resp.json()
+    results = []
+    # API 返回格式: {"data": [{"citingPaper": {...}} or {"citedPaper": {...}}, ...]}
+    key = "citedPaper" if direction == "references" else "citingPaper"
+    for item in data.get("data", []):
+        paper = item.get(key, {})
+        if paper and paper.get("paperId"):
+            results.append(paper)
+    return results
+
+
+_SEED_SELECT_PROMPT = (
+    "You are a research relevance judge.\n"
+    "Given the user's research query and a list of candidate papers, "
+    "select the papers that are MOST directly relevant to the query topic.\n\n"
+    "User Query: {query}\n\n"
+    "Candidate Papers:\n{candidates_json}\n\n"
+    "Return a JSON array of paper_ids for the papers that are most relevant "
+    "to the query. Select at most {select_count} papers.\n"
+    "ONLY select papers that are directly on-topic. "
+    "Reject papers that are tangentially related or from a different field.\n"
+    "Return format: [\"paper_id_1\", \"paper_id_2\", ...]\n"
+)
+
+
+@retry(
+    wait=wait_random_exponential(multiplier=1, max=30),
+    stop=stop_after_attempt(3),
+    reraise=True,
+)
+def _llm_select_seeds(
+    candidates: list[dict],
+    *,
+    query: str,
+    client: genai.Client,
+    select_count: int,
+) -> list[dict]:
+    """用 LLM 从候选论文中筛选与查询最相关的种子论文。
+
+    Args:
+        candidates: 候选论文 raw dict 列表（已按引用数排序）。
+        query: 用户原始查询。
+        client: Gemini API 客户端。
+        select_count: 最多选择多少篇。
+
+    Returns:
+        筛选后的种子论文 raw dict 列表。
+    """
+    if not candidates:
+        return []
+
+    # 构建候选列表 JSON
+    cands_payload = []
+    for p in candidates:
+        cands_payload.append({
+            "paper_id": p.get("paperId", ""),
+            "title": p.get("title", "Untitled"),
+            "year": p.get("year"),
+            "citation_count": p.get("citationCount", 0) or 0,
+            "abstract": (p.get("abstract") or "")[:200],  # 截断摘要节省 token
+        })
+
+    import json
+    prompt = _SEED_SELECT_PROMPT.format(
+        query=query,
+        candidates_json=json.dumps(cands_payload, ensure_ascii=False, indent=2),
+        select_count=select_count,
+    )
+
+    try:
+        response = client.models.generate_content(
+            model=CONFIG["llm"]["flash_model"],
+            contents=prompt,
+            config=genai.types.GenerateContentConfig(
+                response_mime_type="application/json",
+                temperature=0.1,
+            ),
+        )
+        selected_ids = json.loads(response.text)
+
+        # 兼容格式：可能返回 {"paper_ids": [...]} 或直接 [...]
+        if isinstance(selected_ids, dict):
+            selected_ids = (
+                selected_ids.get("paper_ids")
+                or selected_ids.get("selected")
+                or selected_ids.get("ids")
+                or list(selected_ids.values())[0]
+            )
+
+        if not isinstance(selected_ids, list):
+            raise ValueError(f"Unexpected LLM response: {type(selected_ids)}")
+
+        # 映射回原始 dict
+        id_to_paper = {p.get("paperId"): p for p in candidates}
+        seeds = [id_to_paper[pid] for pid in selected_ids if pid in id_to_paper]
+
+        logger.info(
+            f"🧠 LLM seed selection: {len(candidates)} candidates → "
+            f"{len(seeds)} seeds selected"
+        )
+        for s in seeds:
+            logger.info(
+                f"  ✓ [{s.get('citationCount', 0)} cites] "
+                f"{s.get('title', '?')[:60]}"
+            )
+
+        # 如果 LLM 没选到任何论文，回退到引用数排序
+        if not seeds:
+            logger.warning("LLM selected 0 seeds, falling back to top-cited")
+            seeds = candidates[:select_count]
+
+        return seeds[:select_count]
+
+    except Exception as e:
+        logger.warning(f"LLM seed selection failed ({e}), falling back to top-cited")
+        return candidates[:select_count]
+    raw_papers: dict[str, dict],
+    *,
+    http_client: httpx.Client,
+    query: str,
+    client: genai.Client,
+    seed_count: int,
+    direction: str,
+    per_seed_limit: int,
+    min_year: int,
+    max_year: int,
+) -> dict[str, dict]:
+    """用高引种子论文的引用图发现更多相关文献。
+
+    种子选择经过 LLM 筛选，避免离题的高引论文把扩展方向带偏。
+
+    Args:
+        raw_papers: 已有论文池（会被原地扩展）。
+        query: 用户原始查询（用于 LLM 判断相关性）。
+        client: Gemini API 客户端。
+        seed_count: 种子论文数量。
+        direction: 'references', 'citations', 或 'both'。
+        per_seed_limit: 每个种子每个方向的最大获取数。
+        min_year, max_year: 年份范围过滤。
+
+    Returns:
+        扩展后的 raw_papers dict。
+    """
+    # 候选种子：取引用数最高的 2x seed_count 篇，然后用 LLM 筛选
+    candidate_count = seed_count * 3
+    sorted_papers = sorted(
+        raw_papers.values(),
+        key=lambda p: p.get("citationCount", 0) or 0,
+        reverse=True,
+    )
+    candidates = sorted_papers[:candidate_count]
+
+    # LLM 筛选种子
+    seeds = _llm_select_seeds(
+        candidates=candidates,
+        query=query,
+        client=client,
+        select_count=seed_count,
+    )
+
+    logger.info(
+        f"\U0001f331 Citation expansion: {len(seeds)} seeds, "
+        f"direction={direction}, limit={per_seed_limit}/seed"
+    )
+    for s in seeds:
+        logger.info(
+            f"  Seed: [{s.get('citationCount', 0)} cites] "
+            f"{s.get('title', '?')[:60]}..."
+        )
+
+    directions = []
+    if direction in ("references", "both"):
+        directions.append("references")
+    if direction in ("citations", "both"):
+        directions.append("citations")
+
+    before_count = len(raw_papers)
+
+    for seed in seeds:
+        seed_id = seed["paperId"]
+        seed_title = seed.get("title", "?")[:50]
+
+        for d in directions:
+            time.sleep(_S2AG_COOLDOWN)
+            logger.info(f"  → Fetching {d} for: {seed_title}...")
+            try:
+                related = _fetch_related(
+                    seed_id, d,
+                    http_client=http_client,
+                    limit=per_seed_limit,
+                )
+            except Exception as e:
+                logger.warning(f"  Failed to fetch {d} for {seed_id}: {e}")
+                continue
+
+            added = 0
+            for paper in related:
+                pid = paper.get("paperId")
+                if not pid or pid in raw_papers:
+                    continue
+                # 年份范围过滤
+                year = paper.get("year")
+                if year is not None and (year < min_year or year > max_year):
+                    continue
+                raw_papers[pid] = paper
+                added += 1
+
+            logger.info(
+                f"    +{added} new papers from {d} "
+                f"({len(raw_papers)} total)"
+            )
+            time.sleep(1.5)
+
+    logger.info(
+        f"\U0001f331 Expansion complete: {before_count} → {len(raw_papers)} "
+        f"(+{len(raw_papers) - before_count} new)"
+    )
+    return raw_papers
 
 
 def _parse_authors(raw_authors: list[dict] | None) -> list[str]:
@@ -289,14 +558,9 @@ def fetch_and_score(keywords: list[str]) -> list[PaperData]:
             logger.info(f"Searching S2AG for: '{kw}' [{i+1}/{len(keywords)}]")
             try:
                 results = _search_s2ag(kw, http_client=http_client)
-            except _RateLimitError:
-                logger.warning(
-                    f"Rate limit exhausted for '{kw}' after retries, skipping."
-                )
-                continue
             except Exception as e:
                 logger.warning(f"Search failed for '{kw}': {e}")
-                continue
+                results = []
 
             for paper in results:
                 pid = paper.get("paperId")
@@ -306,6 +570,23 @@ def fetch_and_score(keywords: list[str]) -> list[PaperData]:
             logger.info(
                 f"  → {len(results)} results, "
                 f"{len(raw_papers)} unique total"
+            )
+
+            time.sleep(1.5)
+
+        # ── 1.5 引用链扩展 ─────────────────────────────────────
+        expand_cfg = CONFIG["expand"]
+        if expand_cfg["enabled"] and raw_papers:
+            raw_papers = _expand_via_citations(
+                raw_papers,
+                http_client=http_client,
+                query=query,
+                client=client,
+                seed_count=expand_cfg["seed_count"],
+                direction=expand_cfg["direction"],
+                per_seed_limit=expand_cfg["per_seed_limit"],
+                min_year=CONFIG["search"]["min_year"],
+                max_year=CONFIG["search"]["max_year"],
             )
 
     logger.info(f"Aggregated {len(raw_papers)} unique papers after deduplication.")

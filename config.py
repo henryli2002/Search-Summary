@@ -92,6 +92,20 @@ _CONFIG = {
         "fields": "paperId,title,abstract,year,citationCount,authors,url",
         "request_timeout": _env_int("S2AG_REQUEST_TIMEOUT", 30),
     },
+    "expand": {
+        # 引用链扩展（Citation Snowballing）
+        # 用高引论文的引用/被引关系发现更多相关文献
+        "enabled": _env("EXPAND_ENABLED", "true").lower() in ("true", "1", "yes"),
+
+        # 种子论文数量：从关键词检索结果中取引用数最高的 N 篇作为种子
+        "seed_count": _env_int("EXPAND_SEED_COUNT", 3),
+
+        # 扩展方向：references (引用的论文), citations (被引的论文), both (双向)
+        "direction": _env("EXPAND_DIRECTION", "both"),
+
+        # 每个种子论文最多获取多少篇引用/被引
+        "per_seed_limit": _env_int("EXPAND_PER_SEED_LIMIT", 20),
+    },
 }
 
 # ─── 冻结配置：运行时不可修改 ───────────────────────────────────────

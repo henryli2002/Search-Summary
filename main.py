@@ -87,7 +87,8 @@ def run_pipeline(query: str, *, resume: bool = False) -> str:
         f"Pro Model: {CONFIG['llm']['pro_model']}\n"
         f"Domain Filter: {CONFIG['filter']['fields_of_study'] or '[dim]all fields[/]'}\n"
         f"Min Citations: {CONFIG['filter']['min_citations']} "
-        f"(exempt ≥{CONFIG['filter']['citation_exempt_after_year']})"
+        f"(exempt ≥{CONFIG['filter']['citation_exempt_after_year']})\n"
+        f"Citation Expand: {'✅ ' + CONFIG['expand']['direction'] + ' (' + str(CONFIG['expand']['seed_count']) + ' seeds)' if CONFIG['expand']['enabled'] else '[dim]disabled[/]'}"
     )
 
     if resume and completed:
