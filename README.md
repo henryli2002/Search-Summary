@@ -148,3 +148,21 @@ Search-By-Agent/
 ## License
 
 MIT
+
+
+## 归档环境恢复（2026-11-06）
+
+原项目内未发现可导出的虚拟环境。本次使用 uv 0.13.5，根据现有依赖配置重新解析并生成 `requirements.lock`，固定直接/传递依赖及发布包哈希。这不是历史环境的 freeze。锁面向本机 macOS Apple Silicon / Python 3.12，其他操作系统或 CUDA 环境需单独解析；完整服务运行还需要模型、API 凭据及数据库。
+
+```bash
+uv venv .venv --python 3.12
+uv pip sync requirements.lock --require-hashes
+```
+
+`requirements.lock` 是 uv pip 格式锁，恢复时使用以上命令。后续增加依赖后需重新生成锁，不能只改宽松版本声明。升级命令（先评估兼容性）：`uv pip compile requirements.txt --python-version 3.12 --generate-hashes -o requirements.lock`。
+
+### 模型和参数需求
+
+模型通过 API 使用，无项目内本地权重。`LLM_FLASH_MODEL` 默认 gemini-2.5-flash，`LLM_PRO_MODEL` 默认 gemini-2.5-pro；需要 .env 中配置 API 凭据。checkpoints、output 和输入资料已保留。
+
+.env 和实际凭据保留在本地，不纳入提交。Python 缓存、工具缓存和可重建环境可删除；业务数据、自训练模型、评测结果及 Git 历史保留。

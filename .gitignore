@@ -31,3 +31,10 @@ checkpoints/
 # ─── OS ──────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
+
+# Rebuildable local caches
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+.venv/
+!requirements.lock
